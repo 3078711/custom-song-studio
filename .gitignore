@@ -33,6 +33,9 @@ yarn-error.log*
 # env files (can opt-in for committing if needed)
 .env*
 
+# 本地媒体存储（Suno 生成后持久化）
+/storage
+
 # vercel
 .vercel
 
