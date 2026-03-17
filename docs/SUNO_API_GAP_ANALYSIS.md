@@ -29,10 +29,10 @@
 
 | 功能 | API 端点 | 输入要求 | 价值说明 |
 |------|----------|----------|----------|
-| **上传并扩展** | `/api/v1/generate/upload-extend` | uploadUrl（公网音频） | 用户上传自己的音频，AI 续写拉长，不依赖 Suno 生成的版本 |
-| **添加人声** | `/api/v1/generate/add-vocals` | uploadUrl（伴奏）、prompt、style、title | 只有伴奏时，AI 生成人声；卡拉OK、demo 创作场景 |
-| **添加伴奏** | `/api/v1/generate/add-instrumental` | uploadUrl（人声）、tags、title | 只有人声时，AI 生成伴奏；歌手/词曲作者快速出 demo |
-| **生成混音** | `/api/v1/generate/mashup` | 两个音频 | 两首歌混在一起，创意玩法 |
+| **上传并扩展** | `/api/v1/generate/upload-extend` | uploadUrl（公网音频） | ✅ 已实现（Phase 4） |
+| **添加人声** | `/api/v1/generate/add-vocals` | uploadUrl（伴奏）、prompt、style、title | ✅ 已实现（Phase 4） |
+| **添加伴奏** | `/api/v1/generate/add-instrumental` | uploadUrl（人声）、tags、title | ✅ 已实现（Phase 4） |
+| **生成混音** | `/api/v1/generate/mashup` | 两个音频 | ✅ 已实现（Phase 4） |
 
 ### 🟡 中价值：辅助与专业能力
 

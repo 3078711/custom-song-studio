@@ -606,6 +606,206 @@ export async function sunoUploadCover(params: {
   throw lastErr ?? new Error("翻唱请求失败");
 }
 
+// ========== Phase 4: 基于上传的能力 ==========
+
+/** 上传并扩展：从指定秒数续写，保留原风格 */
+export async function sunoUploadExtend(params: {
+  uploadUrl: string;
+  model?: string;
+  defaultParamFlag?: boolean;
+  prompt?: string;
+  style?: string;
+  title?: string;
+  continueAt?: number;
+  instrumental?: boolean;
+}): Promise<string> {
+  if (!SUNO_KEY) throw new Error("SUNO_API_KEY 未配置");
+  await waitForRateLimit();
+
+  const defaultParamFlag = params.defaultParamFlag ?? false;
+  const instrumental = params.instrumental ?? false;
+  const body: Record<string, unknown> = {
+    uploadUrl: params.uploadUrl,
+    defaultParamFlag,
+    model: params.model || "V4_5ALL",
+    instrumental,
+    callBackUrl: process.env.SUNO_CALLBACK_URL || "https://example.com/suno-callback",
+  };
+  if (defaultParamFlag) {
+    body.style = params.style || "流行";
+    body.title = params.title || "扩展";
+    if (!instrumental) body.prompt = params.prompt || "延续原风格";
+    body.continueAt = params.continueAt ?? 30;
+  }
+
+  const res = await fetch(`${SUNO_BASE}/api/v1/generate/upload-extend`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${SUNO_KEY}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(body),
+  });
+  const json = await res.json();
+  if (json.code !== 200) {
+    if (json.code === 430) throw new Error("调用频率过高，请稍后再试");
+    throw new Error(json.msg || `Suno API 错误: ${json.code}`);
+  }
+  const taskId = json.data?.taskId;
+  if (!taskId) throw new Error("Suno API 未返回 taskId");
+  return taskId;
+}
+
+/** 添加人声：在伴奏上生成人声 */
+export async function sunoAddVocals(params: {
+  uploadUrl: string;
+  prompt: string;
+  style: string;
+  title: string;
+  negativeTags?: string;
+  model?: string;
+  vocalGender?: "m" | "f";
+  styleWeight?: number;
+  weirdnessConstraint?: number;
+  audioWeight?: number;
+}): Promise<string> {
+  if (!SUNO_KEY) throw new Error("SUNO_API_KEY 未配置");
+  await waitForRateLimit();
+
+  const body: Record<string, unknown> = {
+    uploadUrl: params.uploadUrl,
+    prompt: params.prompt.trim(),
+    style: params.style.trim() || "流行",
+    title: params.title.trim() || "添加人声",
+    negativeTags: params.negativeTags?.trim() || "无",
+    model: params.model || "V4_5PLUS",
+    callBackUrl: process.env.SUNO_CALLBACK_URL || "https://example.com/suno-callback",
+  };
+  if (params.vocalGender && ["m", "f"].includes(params.vocalGender)) body.vocalGender = params.vocalGender;
+  if (params.styleWeight != null) body.styleWeight = params.styleWeight;
+  if (params.weirdnessConstraint != null) body.weirdnessConstraint = params.weirdnessConstraint;
+  if (params.audioWeight != null) body.audioWeight = params.audioWeight;
+
+  const res = await fetch(`${SUNO_BASE}/api/v1/generate/add-vocals`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${SUNO_KEY}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(body),
+  });
+  const json = await res.json();
+  if (json.code !== 200) {
+    if (json.code === 430) throw new Error("调用频率过高，请稍后再试");
+    throw new Error(json.msg || `Suno API 错误: ${json.code}`);
+  }
+  const taskId = json.data?.taskId;
+  if (!taskId) throw new Error("Suno API 未返回 taskId");
+  return taskId;
+}
+
+/** 添加伴奏：为人声生成伴奏 */
+export async function sunoAddInstrumental(params: {
+  uploadUrl: string;
+  tags: string;
+  title: string;
+  negativeTags?: string;
+  model?: string;
+  vocalGender?: "m" | "f";
+  styleWeight?: number;
+  weirdnessConstraint?: number;
+  audioWeight?: number;
+}): Promise<string> {
+  if (!SUNO_KEY) throw new Error("SUNO_API_KEY 未配置");
+  await waitForRateLimit();
+
+  const body: Record<string, unknown> = {
+    uploadUrl: params.uploadUrl,
+    tags: params.tags.trim() || "流行",
+    title: params.title.trim() || "添加伴奏",
+    negativeTags: params.negativeTags?.trim() || "无",
+    model: params.model || "V4_5PLUS",
+    callBackUrl: process.env.SUNO_CALLBACK_URL || "https://example.com/suno-callback",
+  };
+  if (params.vocalGender && ["m", "f"].includes(params.vocalGender)) body.vocalGender = params.vocalGender;
+  if (params.styleWeight != null) body.styleWeight = params.styleWeight;
+  if (params.weirdnessConstraint != null) body.weirdnessConstraint = params.weirdnessConstraint;
+  if (params.audioWeight != null) body.audioWeight = params.audioWeight;
+
+  const res = await fetch(`${SUNO_BASE}/api/v1/generate/add-instrumental`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${SUNO_KEY}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(body),
+  });
+  const json = await res.json();
+  if (json.code !== 200) {
+    if (json.code === 430) throw new Error("调用频率过高，请稍后再试");
+    throw new Error(json.msg || `Suno API 错误: ${json.code}`);
+  }
+  const taskId = json.data?.taskId;
+  if (!taskId) throw new Error("Suno API 未返回 taskId");
+  return taskId;
+}
+
+/** 生成混音：将两首音频混合 */
+export async function sunoGenerateMashup(params: {
+  uploadUrlList: [string, string];
+  customMode?: boolean;
+  instrumental?: boolean;
+  prompt?: string;
+  style?: string;
+  title?: string;
+  model?: string;
+  vocalGender?: "m" | "f";
+  styleWeight?: number;
+  weirdnessConstraint?: number;
+  audioWeight?: number;
+}): Promise<string> {
+  if (!SUNO_KEY) throw new Error("SUNO_API_KEY 未配置");
+  await waitForRateLimit();
+
+  const customMode = params.customMode ?? true;
+  const instrumental = params.instrumental ?? false;
+  const body: Record<string, unknown> = {
+    uploadUrlList: params.uploadUrlList,
+    customMode,
+    instrumental,
+    model: params.model || "V4_5ALL",
+    callBackUrl: process.env.SUNO_CALLBACK_URL || "https://example.com/suno-callback",
+  };
+  if (customMode) {
+    body.style = params.style || "流行";
+    body.title = params.title || "混音";
+    if (!instrumental) body.prompt = params.prompt || "两首歌曲的创意混音";
+  } else {
+    body.prompt = params.prompt || "两首歌曲的创意混音";
+  }
+  if (params.vocalGender && ["m", "f"].includes(params.vocalGender)) body.vocalGender = params.vocalGender;
+  if (params.styleWeight != null) body.styleWeight = params.styleWeight;
+  if (params.weirdnessConstraint != null) body.weirdnessConstraint = params.weirdnessConstraint;
+  if (params.audioWeight != null) body.audioWeight = params.audioWeight;
+
+  const res = await fetch(`${SUNO_BASE}/api/v1/generate/mashup`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${SUNO_KEY}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(body),
+  });
+  const json = await res.json();
+  if (json.code !== 200) {
+    if (json.code === 430) throw new Error("调用频率过高，请稍后再试");
+    throw new Error(json.msg || `Suno API 错误: ${json.code}`);
+  }
+  const taskId = json.data?.taskId;
+  if (!taskId) throw new Error("Suno API 未返回 taskId");
+  return taskId;
+}
+
 /** 获取带时间戳的歌词（实际演唱内容），用于展示改编后的歌词 */
 export async function sunoGetTimestampedLyrics(
   taskId: string,

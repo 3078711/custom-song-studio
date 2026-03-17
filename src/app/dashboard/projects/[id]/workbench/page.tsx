@@ -24,7 +24,7 @@ import {
   type GenerationTask,
   type EditTask,
 } from "@/lib/songVersions";
-import { EDIT_CAPABILITIES, type EditCapabilityId } from "@/lib/editCapabilities";
+import { EDIT_CAPABILITIES, UPLOAD_CAPABILITIES, type EditCapabilityId, type UploadCapabilityId } from "@/lib/editCapabilities";
 import {
   MODEL_OPTIONS,
   STYLE_OPTIONS,
@@ -228,6 +228,26 @@ export default function WorkbenchPage() {
   const [midiExportUrl, setMidiExportUrl] = useState<string | null>(null);
   const [midiExportForEditTaskId, setMidiExportForEditTaskId] = useState<string | null>(null);
   const [separateType, setSeparateType] = useState<"separate_vocal" | "split_stem">("separate_vocal");
+  /** Phase 3: 改编输入来源 */
+  const [editInputSource, setEditInputSource] = useState<"version" | "upload">("version");
+  const [editUploadUrl, setEditUploadUrl] = useState<string | null>(null);
+  const [editUploadUrlLoading, setEditUploadUrlLoading] = useState(false);
+  const [editUploadUrlError, setEditUploadUrlError] = useState<string | null>(null);
+  const [editUploadUrlInput, setEditUploadUrlInput] = useState("");
+  const [versionToUploadLoading, setVersionToUploadLoading] = useState(false);
+  const [editSectionOpen, setEditSectionOpen] = useState(true);
+  const [editUploadUrl2, setEditUploadUrl2] = useState<string | null>(null);
+  const [editUploadUrl2Input, setEditUploadUrl2Input] = useState("");
+  const [editUploadUrl2Loading, setEditUploadUrl2Loading] = useState(false);
+  const [uploadEditModalCapability, setUploadEditModalCapability] = useState<UploadCapabilityId | null>(null);
+  const [uploadEditModalStep, setUploadEditModalStep] = useState<"intro" | "form">("intro");
+  const [uploadEditForm, setUploadEditForm] = useState({
+    uploadExtend: { continueAt: 30, prompt: "", style: "流行", title: "扩展" },
+    addVocals: { prompt: "", style: "流行", title: "添加人声", negativeTags: "" },
+    addInstrumental: { tags: "流行", title: "添加伴奏", negativeTags: "" },
+    mashup: { prompt: "两首歌曲的创意混音", style: "流行", title: "混音" },
+  });
+  const [uploadEditRunning, setUploadEditRunning] = useState(false);
 
   const displayedVersions = selectedTaskId
     ? (() => {
@@ -249,6 +269,218 @@ export default function WorkbenchPage() {
     setVersions(listVersionsByProject(projectId));
     setTasks(listTasksByProject(projectId));
     setEditTasks(listEditTasksByProject(projectId));
+  };
+
+  /** Phase 3: 将版本 audioUrl 转为 uploadUrl（支持 localhost） */
+  const convertVersionToUploadUrl = async (audioUrl: string) => {
+    if (!audioUrl?.trim()) return;
+    setVersionToUploadLoading(true);
+    setEditUploadUrlError(null);
+    try {
+      const res = await fetch("/api/suno/version-to-upload-url", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ audioUrl: audioUrl.trim() }),
+      });
+      const j = await res.json();
+      if (!res.ok || j.error) {
+        throw new Error(j.error || j.message || "转换失败");
+      }
+      setEditUploadUrl(j.uploadUrl || j.fileUrl);
+      setEditInputSource("upload");
+      setEditSectionOpen(true);
+    } catch (e) {
+      setEditUploadUrlError(e instanceof Error ? e.message : "转换失败");
+    } finally {
+      setVersionToUploadLoading(false);
+    }
+  };
+
+  /** Phase 3: 从链接获取 editUploadUrl */
+  const fetchEditUploadFromUrl = async (url: string) => {
+    const trimmed = url.trim();
+    if (!trimmed) return;
+    setEditUploadUrlLoading(true);
+    setEditUploadUrlError(null);
+    try {
+      const res = await fetch("/api/suno/upload-from-url", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ fileUrl: trimmed }),
+      });
+      const j = await res.json();
+      if (!res.ok || j.error) {
+        throw new Error(j.message || j.error || "无法访问该链接");
+      }
+      setEditUploadUrl(j.fileUrl);
+      setEditInputSource("upload");
+    } catch (e) {
+      setEditUploadUrlError(e instanceof Error ? e.message : "获取失败");
+    } finally {
+      setEditUploadUrlLoading(false);
+    }
+  };
+
+  /** Phase 4: 执行基于上传的编辑 */
+  const handleRunUploadEdit = async (capability: UploadCapabilityId) => {
+    const url1 = editUploadUrl;
+    const url2 = editUploadUrl2;
+    if (!url1) {
+      alert("请先上传或选择音频获取 uploadUrl");
+      return;
+    }
+    if (capability === "mashup" && !url2) {
+      alert("混音需要 2 个音频，请再添加一个");
+      return;
+    }
+
+    setUploadEditRunning(true);
+    const taskLabel = UPLOAD_CAPABILITIES[capability].label;
+    const task = createTask(projectId, {
+      prompt: taskLabel,
+      style: "",
+      title: taskLabel,
+    });
+    updateTask(task.id, { status: "running", progress: 10, startedAt: new Date().toISOString() });
+    setCurrentTaskId(task.id);
+    loadData();
+
+    try {
+      const body: Record<string, unknown> = { capability };
+      if (capability === "uploadExtend") {
+        const f = uploadEditForm.uploadExtend;
+        body.uploadUrl = url1;
+        body.defaultParamFlag = true;
+        body.continueAt = f.continueAt;
+        body.prompt = f.prompt || "延续原风格";
+        body.style = f.style;
+        body.title = f.title;
+      } else if (capability === "addVocals") {
+        const f = uploadEditForm.addVocals;
+        body.uploadUrl = url1;
+        body.prompt = f.prompt || "舒缓人声";
+        body.style = f.style;
+        body.title = f.title;
+        body.negativeTags = f.negativeTags || "无";
+      } else if (capability === "addInstrumental") {
+        const f = uploadEditForm.addInstrumental;
+        body.uploadUrl = url1;
+        body.tags = f.tags;
+        body.title = f.title;
+        body.negativeTags = f.negativeTags || "无";
+      } else if (capability === "mashup") {
+        body.uploadUrlList = [url1, url2!];
+        const f = uploadEditForm.mashup;
+        body.customMode = true;
+        body.prompt = f.prompt;
+        body.style = f.style;
+        body.title = f.title;
+      }
+
+      const res = await fetch("/api/suno/upload-edit", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const json = await res.json();
+      if (!res.ok || json.error) throw new Error(json.error || "请求失败");
+      const sunoTaskId = json.taskId;
+
+      updateTask(task.id, { sunoTaskId, progress: 20 });
+      loadData();
+
+      const pollInterval = 10000;
+      const maxWait = 10 * 60 * 1000;
+      const start = Date.now();
+      let lastProgress = 20;
+
+      while (Date.now() - start < maxWait) {
+        await new Promise((r) => setTimeout(r, pollInterval));
+        const infoRes = await fetch(`/api/suno/record-info?taskId=${encodeURIComponent(sunoTaskId)}`);
+        const info = await infoRes.json();
+        if (!infoRes.ok || info.error) throw new Error(info.error || "查询失败");
+
+        const inProgress = ["PENDING", "GENERATING", "FIRST_SUCCESS", "TEXT_SUCCESS"];
+        if (info.status && !inProgress.includes(info.status) && info.status !== "SUCCESS") {
+          throw new Error(normalizeCopyrightError(info.errorMessage || info.msg || `失败: ${info.status}`));
+        }
+
+        if (info.status === "SUCCESS" && info.response?.data?.length) {
+          const items = info.response.data.slice(0, 2) as Array<{ id?: string; audio_url?: string; image_url?: string; title?: string; duration?: number; prompt?: string }>;
+          let audioUrls = items.map((i) => i.audio_url);
+          let coverUrls = items.map((i) => i.image_url);
+
+          try {
+            const persistRes = await fetch("/api/suno/persist-media", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ items: items.map((i) => ({ audioUrl: i.audio_url, imageUrl: i.image_url })) }),
+            });
+            if (persistRes.ok) {
+              const persist = await persistRes.json();
+              if (persist.items?.length) {
+                audioUrls = persist.items.map((p: { audioUrl?: string }) => p.audioUrl);
+                coverUrls = persist.items.map((p: { coverUrl?: string }) => p.coverUrl);
+              }
+            }
+          } catch {
+            /* ignore */
+          }
+
+          const form = uploadEditForm[capability];
+          const roundNo = 1;
+          const versionIds: string[] = [];
+          for (let i = 0; i < items.length; i++) {
+            const item = items[i];
+            const versionNo = getNextVersionNo(projectId, roundNo);
+            const v = createVersion({
+              projectId,
+              versionNo,
+              roundNo,
+              prompt: item.prompt || taskLabel,
+              lyrics: item.prompt?.trim(),
+              style: (form as { style?: string })?.style || "流行",
+              title: (form as { title?: string })?.title || taskLabel,
+              audioUrl: audioUrls[i],
+              coverUrl: coverUrls[i],
+              durationSeconds: item.duration,
+              status: "draft",
+              isCandidate: false,
+              isSentToCustomer: false,
+              isFinal: false,
+              sunoTaskId,
+              sunoAudioId: item.id,
+            });
+            versionIds.push(v.id);
+          }
+
+          updateTask(task.id, {
+            status: "completed",
+            progress: 100,
+            completedAt: new Date().toISOString(),
+            resultVersionIds: versionIds,
+          });
+          setUploadEditModalCapability(null);
+          setUploadEditRunning(false);
+          setCurrentTaskId(null);
+          loadData();
+          return;
+        }
+
+        lastProgress = Math.min(lastProgress + 15, 90);
+        updateTask(task.id, { progress: lastProgress });
+        loadData();
+      }
+
+      throw new Error("处理超时");
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "处理失败";
+      updateTask(task.id, { status: "failed", errorMessage: msg, completedAt: new Date().toISOString() });
+      alert(msg);
+    } finally {
+      setUploadEditRunning(false);
+      loadData();
+    }
   };
 
   const fetchReferenceFromUrl = async (url: string) => {
@@ -1440,7 +1672,421 @@ export default function WorkbenchPage() {
                 {referenceUploading || referenceUrlLoading ? (referenceStatus || "处理中…") : isGenerating ? "翻唱中…" : "开始翻唱"}
               </button>
             </div>
-          ) : (
+          ) : null}
+          {/* Phase 3: 改编与处理 - 输入来源统一 */}
+          <details
+            open={editSectionOpen}
+            onToggle={(e) => setEditSectionOpen((e.target as HTMLDetailsElement).open)}
+            className="mt-4 rounded-lg border border-violet-200/60 dark:border-violet-800/40"
+          >
+            <summary className="cursor-pointer px-3 py-2.5 text-sm font-medium text-violet-800 dark:text-violet-200 hover:bg-violet-50/50 dark:hover:bg-violet-900/20 rounded-t-lg">
+              ② 改编与处理
+            </summary>
+            <div className="border-t border-violet-200/40 dark:border-violet-700/30 px-3 py-3 space-y-3">
+              <div>
+                <span className="text-xs font-medium text-violet-700 dark:text-violet-300">输入来源：</span>
+                <div className="mt-1.5 flex gap-4">
+                  <label className="flex cursor-pointer items-center gap-2">
+                    <input
+                      type="radio"
+                      name="editInputSource"
+                      checked={editInputSource === "version"}
+                      onChange={() => {
+                        setEditInputSource("version");
+                        setEditUploadUrlError(null);
+                      }}
+                      className="text-violet-500"
+                    />
+                    <span className="text-sm">从版本选择</span>
+                  </label>
+                  <label className="flex cursor-pointer items-center gap-2">
+                    <input
+                      type="radio"
+                      name="editInputSource"
+                      checked={editInputSource === "upload"}
+                      onChange={() => {
+                        setEditInputSource("upload");
+                        setEditUploadUrlError(null);
+                      }}
+                      className="text-violet-500"
+                    />
+                    <span className="text-sm">上传音频</span>
+                  </label>
+                </div>
+              </div>
+              {editInputSource === "version" ? (
+                <div className="rounded-lg bg-violet-50/80 dark:bg-violet-900/20 px-3 py-2 text-xs text-violet-700 dark:text-violet-300">
+                  {selectedVersionId ? (
+                    <>
+                      <span>已选版本：</span>
+                      <span className="font-medium">{getVersionById(selectedVersionId)?.versionNo} {getVersionById(selectedVersionId)?.title}</span>
+                      <span className="ml-1">· 在右侧版本卡片中可进行延长、替换、人声分离等</span>
+                    </>
+                  ) : (
+                    "在右侧版本列表中点击选择版本，可进行延长、替换、人声分离、音乐视频、WAV 导出等"
+                  )}
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  <div className="flex gap-2">
+                    <input
+                      type="url"
+                      value={editUploadUrlInput}
+                      onChange={(e) => {
+                        setEditUploadUrlInput(e.target.value);
+                        setEditUploadUrlError(null);
+                      }}
+                      placeholder="https://example.com/audio.mp3"
+                      disabled={editUploadUrlLoading}
+                      className="flex-1 rounded-lg border border-violet-200 bg-white px-2.5 py-1.5 text-sm dark:border-violet-800/50 dark:bg-zinc-800 dark:text-violet-100"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => editUploadUrlInput.trim() && fetchEditUploadFromUrl(editUploadUrlInput)}
+                      disabled={!editUploadUrlInput.trim() || editUploadUrlLoading}
+                      className="rounded-lg bg-violet-500 px-3 py-1.5 text-sm font-medium text-white hover:bg-violet-600 disabled:opacity-50"
+                    >
+                      {editUploadUrlLoading ? "获取中…" : "获取"}
+                    </button>
+                  </div>
+                  <p className="text-[10px] text-violet-600/80 dark:text-violet-400/80">
+                    粘贴公网音频直链，或从版本卡片点击「转为 uploadUrl」使用本地版本
+                  </p>
+                  {editUploadUrlError && <p className="text-xs text-red-500">{editUploadUrlError}</p>}
+                  {editUploadUrl && <p className="text-xs text-emerald-600 dark:text-emerald-400">已就绪，URL 有效 3 天</p>}
+                </div>
+              )}
+              <div className="pt-2 border-t border-violet-200/40 dark:border-violet-700/30">
+                <p className="text-[10px] text-violet-600/80 dark:text-violet-400/80 mb-2">
+                  基于版本：延长、替换、人声分离、Persona、音乐视频、WAV → 在右侧版本卡片操作
+                </p>
+                <p className="text-[10px] text-violet-600/80 dark:text-violet-400/80 mb-2">
+                  基于上传：
+                </p>
+                <div className="flex flex-wrap gap-2">
+                  {(Object.keys(UPLOAD_CAPABILITIES) as UploadCapabilityId[]).map((capId) => {
+                    const cap = UPLOAD_CAPABILITIES[capId];
+                    const canRun = capId === "mashup" ? (!!editUploadUrl && !!editUploadUrl2) : !!editUploadUrl;
+                    return (
+                      <button
+                        key={capId}
+                        type="button"
+                        disabled={!canRun || uploadEditRunning}
+                        onClick={() => {
+                          setUploadEditModalCapability(capId);
+                          setUploadEditModalStep("intro");
+                        }}
+                        title={!canRun ? (capId === "mashup" ? "需 2 个音频" : "请先获取 uploadUrl") : cap.description}
+                        className="rounded-lg px-2.5 py-1.5 text-xs font-medium bg-violet-100 text-violet-700 hover:bg-violet-200 dark:bg-violet-900/40 dark:text-violet-200 disabled:opacity-50"
+                      >
+                        {cap.label}
+                      </button>
+                    );
+                  })}
+                </div>
+                {editInputSource === "upload" && editUploadUrl && (
+                  <div className="mt-2 space-y-1">
+                    <p className="text-[10px] text-emerald-600 dark:text-emerald-400">音频 1 已就绪</p>
+                    {editUploadUrl2 ? (
+                      <p className="text-[10px] text-emerald-600 dark:text-emerald-400">音频 2 已就绪（可混音）</p>
+                    ) : (
+                      <div className="flex gap-2">
+                        <input
+                          type="url"
+                          value={editUploadUrl2Input}
+                          onChange={(e) => { setEditUploadUrl2Input(e.target.value); setEditUploadUrl2(null); }}
+                          placeholder="https://... 第 2 个音频链接"
+                          disabled={editUploadUrl2Loading}
+                          className="flex-1 rounded border border-violet-200 px-2 py-1 text-xs dark:border-violet-700/50 dark:bg-zinc-800"
+                        />
+                        <button
+                          type="button"
+                          onClick={async () => {
+                            const url = editUploadUrl2Input.trim();
+                            if (!url) return;
+                            setEditUploadUrl2Loading(true);
+                            try {
+                              const res = await fetch("/api/suno/upload-from-url", {
+                                method: "POST",
+                                headers: { "Content-Type": "application/json" },
+                                body: JSON.stringify({ fileUrl: url }),
+                              });
+                              const j = await res.json();
+                              if (res.ok && !j.error) setEditUploadUrl2(j.fileUrl);
+                              else alert(j.message || j.error || "获取失败");
+                            } catch { alert("获取失败"); }
+                            finally { setEditUploadUrl2Loading(false); }
+                          }}
+                          disabled={!editUploadUrl2Input.trim() || editUploadUrl2Loading}
+                          className="rounded px-2 py-1 text-xs bg-violet-500 text-white hover:bg-violet-600 disabled:opacity-50"
+                        >
+                          {editUploadUrl2Loading ? "获取中…" : "获取"}
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            </div>
+          </details>
+          {/* Phase 4: 基于上传编辑弹窗 - 先功能说明，确认后进入参数表单 */}
+          {uploadEditModalCapability && (
+            <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+              <div className="max-w-md w-full rounded-xl bg-white p-6 shadow-xl dark:bg-zinc-900">
+                <h3 className="mb-3 text-lg font-semibold text-violet-900 dark:text-violet-100">
+                  {UPLOAD_CAPABILITIES[uploadEditModalCapability].label}
+                </h3>
+                {uploadEditModalStep === "intro" ? (
+                  <>
+                    <p className="mb-4 text-sm text-zinc-600 dark:text-zinc-400 leading-relaxed">
+                      {UPLOAD_CAPABILITIES[uploadEditModalCapability].confirmDetail}
+                    </p>
+                    <div className="flex gap-2 justify-end">
+                      <button
+                        type="button"
+                        onClick={() => { setUploadEditModalCapability(null); setUploadEditModalStep("intro"); }}
+                        className="rounded-lg px-4 py-2 text-sm bg-zinc-100 text-zinc-700 dark:bg-zinc-700 dark:text-zinc-200"
+                      >
+                        取消
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setUploadEditModalStep("form")}
+                        className="rounded-lg px-4 py-2 text-sm bg-violet-500 text-white hover:bg-violet-600"
+                      >
+                        下一步
+                      </button>
+                    </div>
+                  </>
+                ) : (
+                  <>
+                <p className="mb-4 text-sm text-zinc-600 dark:text-zinc-400">
+                  {UPLOAD_CAPABILITIES[uploadEditModalCapability].description}
+                </p>
+                <div className="space-y-3">
+                  {uploadEditModalCapability === "uploadExtend" && (
+                    <>
+                      <div>
+                        <label className={labelCls}>续写起点（秒）</label>
+                        <input
+                          type="number"
+                          min={1}
+                          value={uploadEditForm.uploadExtend.continueAt}
+                          onChange={(e) => setUploadEditForm((f) => ({
+                            ...f,
+                            uploadExtend: { ...f.uploadExtend, continueAt: Number(e.target.value) },
+                          }))}
+                          className={inputCls}
+                        />
+                      </div>
+                      <div>
+                        <label className={labelCls}>续写描述 / 歌词</label>
+                        <textarea
+                          value={uploadEditForm.uploadExtend.prompt}
+                          onChange={(e) => setUploadEditForm((f) => ({
+                            ...f,
+                            uploadExtend: { ...f.uploadExtend, prompt: e.target.value },
+                          }))}
+                          placeholder="延续原风格或填写新歌词"
+                          rows={2}
+                          className={inputCls}
+                        />
+                      </div>
+                      <div>
+                        <label className={labelCls}>风格</label>
+                        <input
+                          type="text"
+                          value={uploadEditForm.uploadExtend.style}
+                          onChange={(e) => setUploadEditForm((f) => ({
+                            ...f,
+                            uploadExtend: { ...f.uploadExtend, style: e.target.value },
+                          }))}
+                          className={inputCls}
+                        />
+                      </div>
+                      <div>
+                        <label className={labelCls}>标题</label>
+                        <input
+                          type="text"
+                          value={uploadEditForm.uploadExtend.title}
+                          onChange={(e) => setUploadEditForm((f) => ({
+                            ...f,
+                            uploadExtend: { ...f.uploadExtend, title: e.target.value },
+                          }))}
+                          className={inputCls}
+                        />
+                      </div>
+                    </>
+                  )}
+                  {uploadEditModalCapability === "addVocals" && (
+                    <>
+                      <div>
+                        <label className={labelCls}>人声描述 / 歌词</label>
+                        <textarea
+                          value={uploadEditForm.addVocals.prompt}
+                          onChange={(e) => setUploadEditForm((f) => ({
+                            ...f,
+                            addVocals: { ...f.addVocals, prompt: e.target.value },
+                          }))}
+                          placeholder="描述人声风格或填写歌词"
+                          rows={3}
+                          className={inputCls}
+                        />
+                      </div>
+                      <div>
+                        <label className={labelCls}>风格</label>
+                        <input
+                          type="text"
+                          value={uploadEditForm.addVocals.style}
+                          onChange={(e) => setUploadEditForm((f) => ({
+                            ...f,
+                            addVocals: { ...f.addVocals, style: e.target.value },
+                          }))}
+                          className={inputCls}
+                        />
+                      </div>
+                      <div>
+                        <label className={labelCls}>标题</label>
+                        <input
+                          type="text"
+                          value={uploadEditForm.addVocals.title}
+                          onChange={(e) => setUploadEditForm((f) => ({
+                            ...f,
+                            addVocals: { ...f.addVocals, title: e.target.value },
+                          }))}
+                          className={inputCls}
+                        />
+                      </div>
+                      <div>
+                        <label className={labelCls}>排除风格 (negativeTags)</label>
+                        <input
+                          type="text"
+                          value={uploadEditForm.addVocals.negativeTags}
+                          onChange={(e) => setUploadEditForm((f) => ({
+                            ...f,
+                            addVocals: { ...f.addVocals, negativeTags: e.target.value },
+                          }))}
+                          placeholder="如：重金属"
+                          className={inputCls}
+                        />
+                      </div>
+                    </>
+                  )}
+                  {uploadEditModalCapability === "addInstrumental" && (
+                    <>
+                      <div>
+                        <label className={labelCls}>伴奏风格 (tags)</label>
+                        <input
+                          type="text"
+                          value={uploadEditForm.addInstrumental.tags}
+                          onChange={(e) => setUploadEditForm((f) => ({
+                            ...f,
+                            addInstrumental: { ...f.addInstrumental, tags: e.target.value },
+                          }))}
+                          placeholder="如：流行、钢琴、氛围"
+                          className={inputCls}
+                        />
+                      </div>
+                      <div>
+                        <label className={labelCls}>标题</label>
+                        <input
+                          type="text"
+                          value={uploadEditForm.addInstrumental.title}
+                          onChange={(e) => setUploadEditForm((f) => ({
+                            ...f,
+                            addInstrumental: { ...f.addInstrumental, title: e.target.value },
+                          }))}
+                          className={inputCls}
+                        />
+                      </div>
+                      <div>
+                        <label className={labelCls}>排除风格 (negativeTags)</label>
+                        <input
+                          type="text"
+                          value={uploadEditForm.addInstrumental.negativeTags}
+                          onChange={(e) => setUploadEditForm((f) => ({
+                            ...f,
+                            addInstrumental: { ...f.addInstrumental, negativeTags: e.target.value },
+                          }))}
+                          placeholder="如：重金属"
+                          className={inputCls}
+                        />
+                      </div>
+                    </>
+                  )}
+                  {uploadEditModalCapability === "mashup" && (
+                    <>
+                      <div>
+                        <label className={labelCls}>混音描述 (prompt)</label>
+                        <textarea
+                          value={uploadEditForm.mashup.prompt}
+                          onChange={(e) => setUploadEditForm((f) => ({
+                            ...f,
+                            mashup: { ...f.mashup, prompt: e.target.value },
+                          }))}
+                          placeholder="描述混音风格"
+                          rows={2}
+                          className={inputCls}
+                        />
+                      </div>
+                      <div>
+                        <label className={labelCls}>风格</label>
+                        <input
+                          type="text"
+                          value={uploadEditForm.mashup.style}
+                          onChange={(e) => setUploadEditForm((f) => ({
+                            ...f,
+                            mashup: { ...f.mashup, style: e.target.value },
+                          }))}
+                          className={inputCls}
+                        />
+                      </div>
+                      <div>
+                        <label className={labelCls}>标题</label>
+                        <input
+                          type="text"
+                          value={uploadEditForm.mashup.title}
+                          onChange={(e) => setUploadEditForm((f) => ({
+                            ...f,
+                            mashup: { ...f.mashup, title: e.target.value },
+                          }))}
+                          className={inputCls}
+                        />
+                      </div>
+                    </>
+                  )}
+                </div>
+                <div className="mt-4 flex gap-2 justify-end">
+                  <button
+                    type="button"
+                    onClick={() => setUploadEditModalStep("intro")}
+                    disabled={uploadEditRunning}
+                    className="rounded-lg px-4 py-2 text-sm bg-zinc-100 text-zinc-700 dark:bg-zinc-700 dark:text-zinc-200 disabled:opacity-50"
+                  >
+                    上一步
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => { setUploadEditModalCapability(null); setUploadEditModalStep("intro"); }}
+                    className="rounded-lg px-4 py-2 text-sm bg-zinc-100 text-zinc-700 dark:bg-zinc-700 dark:text-zinc-200"
+                  >
+                    取消
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleRunUploadEdit(uploadEditModalCapability)}
+                    disabled={uploadEditRunning}
+                    className="rounded-lg px-4 py-2 text-sm bg-violet-500 text-white hover:bg-violet-600 disabled:opacity-50"
+                  >
+                    {uploadEditRunning ? "处理中…" : "确认执行"}
+                  </button>
+                </div>
+                  </>
+                )}
+              </div>
+            </div>
+          )}
+          {createMode !== "reference" && (
             <div className="space-y-4">
           <div className="mb-4 flex items-center justify-between">
             <h2 className="text-lg font-semibold text-amber-900 dark:text-amber-100">
@@ -2254,13 +2900,24 @@ export default function WorkbenchPage() {
                   )}
                   <div className="px-3 pb-3 flex flex-wrap gap-2">
                     {v.audioUrl && (
-                      <button
-                        onClick={() => handleRefreshLyrics(v.id)}
-                        disabled={!!refreshingLyricsId}
-                        className="rounded-lg px-3 py-1.5 text-sm font-medium bg-slate-100 text-slate-600 hover:bg-slate-200 dark:bg-slate-700/50 dark:text-slate-300 disabled:opacity-50"
-                      >
-                        {refreshingLyricsId === v.id ? "获取中…" : "刷新改编歌词"}
-                      </button>
+                      <>
+                        <button
+                          onClick={() => handleRefreshLyrics(v.id)}
+                          disabled={!!refreshingLyricsId}
+                          className="rounded-lg px-3 py-1.5 text-sm font-medium bg-slate-100 text-slate-600 hover:bg-slate-200 dark:bg-slate-700/50 dark:text-slate-300 disabled:opacity-50"
+                        >
+                          {refreshingLyricsId === v.id ? "获取中…" : "刷新改编歌词"}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => convertVersionToUploadUrl(v.audioUrl!)}
+                          disabled={versionToUploadLoading}
+                          title="转为 uploadUrl 后可用于添加人声、添加伴奏、扩展等（Phase 4）"
+                          className="rounded-lg px-3 py-1.5 text-sm font-medium bg-violet-100 text-violet-700 hover:bg-violet-200 dark:bg-violet-900/40 dark:text-violet-200 disabled:opacity-50"
+                        >
+                          {versionToUploadLoading ? "转换中…" : "转为 uploadUrl"}
+                        </button>
+                      </>
                     )}
                     <button
                       onClick={() => handleVersionAction(v.id, "candidate")}
