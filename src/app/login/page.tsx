@@ -35,7 +35,7 @@ export default function LoginPage() {
     try {
       await new Promise((resolve) => setTimeout(resolve, 400));
       if (username.trim() === VALID_USERNAME && password === VALID_PASSWORD) {
-        sessionStorage.setItem("loggedIn", "true");
+        localStorage.setItem("loggedIn", "true");
         router.push("/dashboard");
       } else {
         setError("用户名或密码错误");

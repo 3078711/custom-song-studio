@@ -73,18 +73,22 @@ export async function sunoGenerate(params: SunoGenerateParams): Promise<string> 
 
   await waitForRateLimit();
 
+  const instrumental = !!params.instrumental;
+  /** 有人声时必须走 customMode，否则不会发送 style/title，曲风/标题与歌词字段易错位 */
+  const customMode = !instrumental ? true : !!params.customMode;
+
   const body: Record<string, unknown> = {
-    customMode: params.customMode,
-    instrumental: params.instrumental,
+    customMode,
+    instrumental,
     model: params.model,
     callBackUrl:
       process.env.SUNO_CALLBACK_URL || "https://example.com/suno-callback",
   };
 
-  if (params.customMode) {
+  if (customMode) {
     body.style = params.style;
     body.title = params.title;
-    if (!params.instrumental) {
+    if (!instrumental) {
       body.prompt = params.prompt;
     }
   } else {

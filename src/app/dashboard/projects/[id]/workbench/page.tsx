@@ -26,6 +26,11 @@ import {
 } from "@/lib/songVersions";
 import { EDIT_CAPABILITIES, UPLOAD_CAPABILITIES, type EditCapabilityId, type UploadCapabilityId } from "@/lib/editCapabilities";
 import {
+  isBeyondSunoHostedRetention,
+  isArchivedMasterAudioUrl,
+  SUNO_HOSTED_MEDIA_RETENTION_DAYS,
+} from "@/lib/sunoRetentionPolicy";
+import {
   MODEL_OPTIONS,
   STYLE_OPTIONS,
   VOCAL_GENDER_OPTIONS,
@@ -44,6 +49,8 @@ import {
   LYRIC_STRUCTURE_HINT,
   stripStyleExtrasFromPrompt,
   REFERENCE_MODEL_OPTIONS,
+  pickLyricsForVersionStorage,
+  lyricsCandidateLooksLikeStyleEcho,
 } from "@/lib/workbenchParams";
 import { prepareAudioForUpload } from "@/lib/audioConvert";
 import { normalizeCopyrightError } from "@/lib/suno";
@@ -148,7 +155,7 @@ type FormState = {
 
 const defaultForm: FormState = {
   lyricMode: "strict",
-  model: "V5",
+  model: "V4_5PLUS",
   prompt: "",
   style: "流行",
   title: "",
@@ -584,12 +591,13 @@ export default function WorkbenchPage() {
     return () => clearInterval(timer);
   }, [currentTaskId, isGenerating, projectId]);
 
-  const customMode = form.lyricMode === "strict";
+  const lyricModeStrict = form.lyricMode === "strict";
 
   const getFinalPrompt = () =>
     buildPrompt({
       basePrompt: form.prompt,
-      lyricsOnly: customMode,
+      /** 有人声时 prompt 仅作歌词/描述正文，曲风与人声指令全部进 style，避免 custom 模式下把指令唱进歌里 */
+      lyricsOnly: !form.instrumental,
       baseStyle: form.style || undefined,
       ethnicId: form.ethnicId || undefined,
       ethnicExtra: form.ethnicExtra || undefined,
@@ -606,7 +614,7 @@ export default function WorkbenchPage() {
       sceneExtra: form.sceneExtra || undefined,
       moodExtra: form.moodExtra || undefined,
       instrumentExtra: form.instrumentExtra || undefined,
-      maxLength: customMode ? 5000 : 500,
+      maxLength: !form.instrumental ? 5000 : 500,
     });
 
   const getFinalStyle = () =>
@@ -627,7 +635,8 @@ export default function WorkbenchPage() {
       eraId: form.eraId || undefined,
       eraExtra: form.eraExtra || undefined,
       languageId: form.instrumental ? undefined : form.languageId || undefined,
-      lyricsWithoutStructure: customMode && !!form.prompt.trim() && !hasStructureTags(form.prompt),
+      lyricsWithoutStructure:
+        !form.instrumental && !!form.prompt.trim() && !hasStructureTags(form.prompt),
     });
 
   const runSimulatedGeneration = async (
@@ -681,8 +690,8 @@ export default function WorkbenchPage() {
       alert("请输入 Prompt，或勾选「纯音乐」");
       return;
     }
-    if (customMode && !form.instrumental && !finalStyle) {
-      alert("「不能修改歌词」模式下请选择风格");
+    if (!form.instrumental && !finalStyle.trim()) {
+      alert("有人声生成需要选择曲风（风格会写入 Suno 的 style 字段）");
       return;
     }
 
@@ -712,7 +721,7 @@ export default function WorkbenchPage() {
           title: form.title.trim() || "未命名",
           model: form.model,
           instrumental: form.instrumental,
-          customMode,
+          customMode: true,
           negativeTags: [form.negativeTags?.trim(), getEthnicNegativeTags(form.ethnicId)].filter(Boolean).join(", ") || undefined,
           vocalGender: vocalForSuno,
           styleWeight: form.styleWeight,
@@ -809,7 +818,14 @@ export default function WorkbenchPage() {
               versionNo,
               roundNo,
               prompt: finalPrompt || item.prompt || "",
-              lyrics: item.prompt?.trim() || form.prompt.trim() || undefined,
+              lyrics: pickLyricsForVersionStorage({
+                sunoPromptOrLyrics: item.prompt,
+                userFieldPrompt: form.prompt,
+                finalPromptSent: finalPrompt,
+                submittedStyle: finalStyle,
+                lyricModeStrict,
+                instrumental: form.instrumental,
+              }),
               style: finalStyle,
               title: form.title?.trim() || item.title || "未命名",
               audioUrl: audioUrls[i],
@@ -833,8 +849,12 @@ export default function WorkbenchPage() {
               })
                 .then((r) => r.json())
                 .then((data) => {
-                  if (data.lyrics?.trim()) {
-                    updateVersion(version.id, { lyrics: data.lyrics.trim() });
+                  const synced = data.lyrics?.trim();
+                  if (
+                    synced &&
+                    !lyricsCandidateLooksLikeStyleEcho(synced, finalStyle, form.prompt)
+                  ) {
+                    updateVersion(version.id, { lyrics: synced });
                     loadData();
                   }
                 })
@@ -896,13 +916,14 @@ export default function WorkbenchPage() {
     loadData();
 
     try {
+      const refStyle = getFinalStyle();
       const res = await fetch("/api/suno/upload-cover", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           uploadUrl: referenceFileUrl,
           prompt: form.prompt.trim(),
-          style: form.style.trim(),
+          style: refStyle,
           title: form.title.trim(),
           customMode: true,
           instrumental: false,
@@ -985,7 +1006,7 @@ export default function WorkbenchPage() {
           const roundNo = 1;
           const versionIds: string[] = [];
           const finalPrompt = form.prompt.trim();
-          const finalStyle = form.style.trim();
+          const finalStyle = getFinalStyle();
 
           for (let i = 0; i < items.length; i++) {
             const item = items[i];
@@ -995,7 +1016,14 @@ export default function WorkbenchPage() {
               versionNo,
               roundNo,
               prompt: finalPrompt,
-              lyrics: item.prompt?.trim() || finalPrompt,
+              lyrics: pickLyricsForVersionStorage({
+                sunoPromptOrLyrics: item.prompt,
+                userFieldPrompt: form.prompt,
+                finalPromptSent: finalPrompt,
+                submittedStyle: finalStyle,
+                lyricModeStrict,
+                instrumental: false,
+              }),
               style: finalStyle,
               title: form.title.trim() || item.title || "翻唱",
               audioUrl: audioUrls[i],
@@ -1019,8 +1047,12 @@ export default function WorkbenchPage() {
               })
                 .then((r) => r.json())
                 .then((data) => {
-                  if (data.lyrics?.trim()) {
-                    updateVersion(version.id, { lyrics: data.lyrics.trim() });
+                  const synced = data.lyrics?.trim();
+                  if (
+                    synced &&
+                    !lyricsCandidateLooksLikeStyleEcho(synced, finalStyle, form.prompt)
+                  ) {
+                    updateVersion(version.id, { lyrics: synced });
                     loadData();
                   }
                 })
@@ -1090,6 +1122,12 @@ export default function WorkbenchPage() {
   const handleRefreshLyrics = async (versionId: string) => {
     const v = getVersionById(versionId);
     if (!v) return;
+    if (isBeyondSunoHostedRetention(v.createdAt)) {
+      alert(
+        "该版本已超过 Suno 云端媒体保留期（约 14 天），无法可靠拉取时间轴歌词。请使用版本中已保存的歌词，或通过已归档音频继续创作。"
+      );
+      return;
+    }
     let taskId: string | undefined = v.sunoTaskId;
     let audioId: string | undefined = v.sunoAudioId;
     if (!taskId || !audioId) {
@@ -1147,6 +1185,12 @@ export default function WorkbenchPage() {
     const v = selectedVersionId ? getVersionById(selectedVersionId) : null;
     if (!v?.sunoTaskId || !v.sunoAudioId) {
       alert("该版本缺少 Suno 任务信息，无法进行深度编辑");
+      return;
+    }
+    if (isBeyondSunoHostedRetention(v.createdAt)) {
+      alert(
+        "该版本已超过 Suno 云端保留期（约 14 天），基于 taskId/audioId 的深度编辑已关闭。请在左侧选择「上传音频」，或使用版本卡片「转为 uploadUrl」后通过「上传并扩展」等能力继续。"
+      );
       return;
     }
     const storedModel = v.creationParams?.model as string | undefined;
@@ -1717,13 +1761,34 @@ export default function WorkbenchPage() {
               {editInputSource === "version" ? (
                 <div className="rounded-lg bg-violet-50/80 dark:bg-violet-900/20 px-3 py-2 text-xs text-violet-700 dark:text-violet-300">
                   {selectedVersionId ? (
-                    <>
-                      <span>已选版本：</span>
-                      <span className="font-medium">{getVersionById(selectedVersionId)?.versionNo} {getVersionById(selectedVersionId)?.title}</span>
-                      <span className="ml-1">· 在右侧版本卡片中可进行延长、替换、人声分离等</span>
-                    </>
+                    (() => {
+                      const sv = getVersionById(selectedVersionId);
+                      const beyond = sv && isBeyondSunoHostedRetention(sv.createdAt);
+                      return beyond ? (
+                        <>
+                          <span>已选版本：</span>
+                          <span className="font-medium">
+                            {sv?.versionNo} {sv?.title}
+                          </span>
+                          <span className="ml-1 block mt-1 text-amber-800 dark:text-amber-200/90">
+                            已超过 Suno 约 {SUNO_HOSTED_MEDIA_RETENTION_DAYS} 天托管期：请在右侧点「转为
+                            uploadUrl」，再切到「上传音频」或粘贴链接，使用下方「上传并扩展」等；勿依赖右侧「深度编辑」。
+                          </span>
+                        </>
+                      ) : (
+                        <>
+                          <span>已选版本：</span>
+                          <span className="font-medium">
+                            {sv?.versionNo} {sv?.title}
+                          </span>
+                          <span className="ml-1">
+                            · 在右侧版本卡片中可进行延长、替换、人声分离等（托管期内）
+                          </span>
+                        </>
+                      );
+                    })()
                   ) : (
-                    "在右侧版本列表中点击选择版本，可进行延长、替换、人声分离、音乐视频、WAV 导出等"
+                    "在右侧版本列表中点击选择版本：托管期内可进行延长、替换、人声分离、音乐视频、WAV 导出等；超时请用上传类能力"
                   )}
                 </div>
               ) : (
@@ -1758,7 +1823,11 @@ export default function WorkbenchPage() {
               )}
               <div className="pt-2 border-t border-violet-200/40 dark:border-violet-700/30">
                 <p className="text-[10px] text-violet-600/80 dark:text-violet-400/80 mb-2">
-                  基于版本：延长、替换、人声分离、Persona、音乐视频、WAV → 在右侧版本卡片操作
+                  {selectedVersionId &&
+                  getVersionById(selectedVersionId) &&
+                  isBeyondSunoHostedRetention(getVersionById(selectedVersionId)!.createdAt)
+                    ? `基于 Suno ID 的改编仅在生成后约 ${SUNO_HOSTED_MEDIA_RETENTION_DAYS} 天内可用；当前版本已超时，请仅用下方「上传并扩展」等。`
+                    : "基于版本（taskId+audioId）：延长、替换、人声分离、Persona、音乐视频、WAV → 在右侧版本卡片操作（托管期内）"}
                 </p>
                 <p className="text-[10px] text-violet-600/80 dark:text-violet-400/80 mb-2">
                   基于上传：
@@ -2759,6 +2828,11 @@ export default function WorkbenchPage() {
                     })()
                   : "试听、选稿、深度编辑、标记最终版"}
               </p>
+              {!selectedVersionId && (
+                <p className="mt-1 text-[11px] text-violet-600 dark:text-violet-400/90">
+                  提示：先<strong>点击</strong>下方某一版本卡片选中它，右侧展开区域才会出现「深度编辑」（含替换分区、延长等）。
+                </p>
+              )}
             </div>
             <div className="flex items-center gap-2">
               {selectedTaskId && (
@@ -2835,6 +2909,14 @@ export default function WorkbenchPage() {
                           <span className="font-medium text-amber-900 dark:text-amber-100">
                             {v.versionNo}
                           </span>
+                          {isBeyondSunoHostedRetention(v.createdAt) && (
+                            <span
+                              className="ml-1.5 shrink-0 rounded bg-zinc-200 px-1.5 py-0.5 text-[10px] font-medium text-zinc-700 dark:bg-zinc-700 dark:text-zinc-200"
+                              title={`已超过 Suno 云端约 ${SUNO_HOSTED_MEDIA_RETENTION_DAYS} 天保留期；深度编辑请用「转为 uploadUrl」+ 左侧上传类能力`}
+                            >
+                              超保留期
+                            </span>
+                          )}
                           <span className="ml-2 text-sm text-amber-600 dark:text-amber-400/80">
                             {v.title}
                           </span>
@@ -2903,7 +2985,14 @@ export default function WorkbenchPage() {
                       <>
                         <button
                           onClick={() => handleRefreshLyrics(v.id)}
-                          disabled={!!refreshingLyricsId}
+                          disabled={
+                            !!refreshingLyricsId || isBeyondSunoHostedRetention(v.createdAt)
+                          }
+                          title={
+                            isBeyondSunoHostedRetention(v.createdAt)
+                              ? `已超过约 ${SUNO_HOSTED_MEDIA_RETENTION_DAYS} 天 Suno 托管期，时间轴歌词接口不可用`
+                              : undefined
+                          }
                           className="rounded-lg px-3 py-1.5 text-sm font-medium bg-slate-100 text-slate-600 hover:bg-slate-200 dark:bg-slate-700/50 dark:text-slate-300 disabled:opacity-50"
                         >
                           {refreshingLyricsId === v.id ? "获取中…" : "刷新改编歌词"}
@@ -2956,7 +3045,10 @@ export default function WorkbenchPage() {
             const sel = getVersionById(selectedVersionId);
             if (!sel) return null;
             const params = sel.creationParams;
-            const canEdit = !!(sel.sunoTaskId && sel.sunoAudioId);
+            const beyondSunoHostedRetention = isBeyondSunoHostedRetention(sel.createdAt);
+            const hasArchivedMaster = isArchivedMasterAudioUrl(sel.audioUrl);
+            const canUseSunoIdPipeline =
+              !!(sel.sunoTaskId && sel.sunoAudioId) && !beyondSunoHostedRetention;
             return (
               <>
               <div className="mt-4 rounded-lg border border-amber-200/60 bg-amber-50/50 p-4 dark:border-amber-800/40 dark:bg-amber-900/10">
@@ -3004,13 +3096,52 @@ export default function WorkbenchPage() {
                   </>
                 )}
               </div>
-              {canEdit && (
-                <div className="mt-4 rounded-lg border border-violet-200/60 bg-violet-50/50 p-4 dark:border-violet-800/40 dark:bg-violet-900/10">
+              <div
+                id="workbench-deep-edit"
+                className="mt-4 flex flex-col gap-4 scroll-mt-24"
+              >
+              {beyondSunoHostedRetention && (
+                <div className="rounded-lg border border-amber-300/70 bg-amber-50/90 p-4 dark:border-amber-700/50 dark:bg-amber-950/30">
+                  <h3 className="mb-2 text-sm font-semibold text-amber-900 dark:text-amber-100">
+                    已超过 Suno 云端媒体保留期（约 {SUNO_HOSTED_MEDIA_RETENTION_DAYS} 天）
+                  </h3>
+                  <p className="mb-2 text-xs text-amber-800 dark:text-amber-200/90">
+                    延长、替换、人声分离、Persona、音乐视频、导出 WAV、拉取时间轴歌词等<strong>基于 taskId/audioId</strong>的能力已在此隐藏，避免调用失败。请改用已归档母带 + 上传重投。
+                  </p>
+                  <ul className="list-inside list-disc text-xs text-amber-800 dark:text-amber-200/85 space-y-1">
+                    <li>点击下方「转为 uploadUrl」，再到左侧「改编工作台」选择「上传音频」或粘贴链接获取 uploadUrl，使用「上传并扩展」「添加人声」等。</li>
+                    <li>若音频已持久化到本站（/api/media/audio/），可长期试听；外链若失效需依赖本地备份。</li>
+                  </ul>
+                  {!hasArchivedMaster && sel.audioUrl && (
+                    <p className="mt-2 text-xs font-medium text-amber-900 dark:text-amber-100">
+                      当前版本音频仍指向外部 URL，若无法播放说明 Suno 侧已清理，请从备份恢复或重新生成。
+                    </p>
+                  )}
+                </div>
+              )}
+              {!canUseSunoIdPipeline && !beyondSunoHostedRetention && (
+                <div className="rounded-lg border border-violet-200/60 bg-violet-50/50 p-4 dark:border-violet-800/40 dark:bg-violet-900/10">
+                  <h3 className="mb-2 text-sm font-semibold text-violet-900 dark:text-violet-100">
+                    深度编辑
+                  </h3>
+                  <p className="mb-2 text-xs text-violet-700 dark:text-violet-300/90">
+                    当前版本<strong>缺少 Suno 任务信息</strong>（需要已保存的 <code className="rounded bg-violet-100 px-1 dark:bg-violet-900/50">sunoTaskId</code> 与{" "}
+                    <code className="rounded bg-violet-100 px-1 dark:bg-violet-900/50">sunoAudioId</code>
+                    ），因此无法使用「替换分区、延长、人声分离、Persona、音乐视频、导出 WAV」等按钮。这通常出现在：手动导入的版本、或生成未完成/未写入 ID 的记录。
+                  </p>
+                  <ul className="list-inside list-disc text-xs text-violet-600 dark:text-violet-400/90 space-y-1">
+                    <li>请在本工作台使用「生成歌曲」成功产出版本后，再选中该版本进行深度编辑。</li>
+                    <li>或到左侧「改编工作台」用「上传音频」走「上传并扩展 / 添加人声」等（不依赖上述 ID）。</li>
+                  </ul>
+                </div>
+              )}
+              {canUseSunoIdPipeline && (
+                <div className="rounded-lg border border-violet-200/60 bg-violet-50/50 p-4 dark:border-violet-800/40 dark:bg-violet-900/10">
                   <h3 className="mb-3 text-sm font-semibold text-violet-900 dark:text-violet-100">
                     深度编辑
                   </h3>
                   <p className="mb-3 text-xs text-violet-600 dark:text-violet-400/80">
-                    基于当前版本进行延长、替换、人声分离、音乐视频或生成 Persona
+                    基于当前版本进行延长、替换、人声分离、音乐视频或生成 Persona（Suno 托管窗口内）
                   </p>
                   <div className="mb-3 flex flex-wrap gap-2">
                     <button
@@ -3099,6 +3230,7 @@ export default function WorkbenchPage() {
                   </div>
                 </div>
               )}
+              </div>
               {(() => {
                 const completedForVersion = editTasks.filter(
                   (t) => t.sourceVersionId === sel.id && t.status === "completed"

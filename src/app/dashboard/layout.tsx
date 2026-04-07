@@ -25,14 +25,22 @@ export default function DashboardLayout({
 
   useEffect(() => {
     if (!mounted) return;
-    const loggedIn = sessionStorage.getItem("loggedIn");
+    // localStorage 在同源下跨标签页共享；sessionStorage 不共享。外链「深度编辑」新开标签时需能读到登录态。
+    if (typeof window !== "undefined") {
+      const legacy = sessionStorage.getItem("loggedIn");
+      if (legacy === "true" && localStorage.getItem("loggedIn") !== "true") {
+        localStorage.setItem("loggedIn", "true");
+        sessionStorage.removeItem("loggedIn");
+      }
+    }
+    const loggedIn = localStorage.getItem("loggedIn");
     if (loggedIn !== "true") {
       router.replace("/login");
     }
   }, [mounted, router]);
 
   const handleLogout = () => {
-    sessionStorage.removeItem("loggedIn");
+    localStorage.removeItem("loggedIn");
     router.replace("/login");
   };
 
