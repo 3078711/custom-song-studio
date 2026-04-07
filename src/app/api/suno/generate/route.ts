@@ -5,12 +5,13 @@ export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
 
+    const instrumental = !!body.instrumental;
     const taskId = await sunoGenerate({
       prompt: body.prompt || "",
       style: body.style || "",
       title: body.title || "未命名",
       model: body.model || "V4_5ALL",
-      instrumental: !!body.instrumental,
+      instrumental,
       customMode: !!body.customMode,
       negativeTags: body.negativeTags,
       vocalGender: ["m", "f"].includes(body.vocalGender)

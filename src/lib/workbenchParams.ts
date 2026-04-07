@@ -451,7 +451,7 @@ const STYLE_MAP: Record<string, { tags: string; climax: string }> = {
   "电子": { tags: "electronic, synth-driven, modern production", climax: "big drop, catchy hook, high energy chorus" },
   "R&B": { tags: "r&b, soul, smooth vocals", climax: "soulful chorus, memorable hook" },
   "爵士": { tags: "jazz, smooth, sophisticated", climax: "swinging chorus, melodic climax" },
-  "轻音乐": { tags: "light music, instrumental, ambient", climax: "melodic peak, gentle build" },
+  "轻音乐": { tags: "light music, gentle melodic arrangement, soft ambient feel", climax: "melodic peak, gentle build" },
   "古典": { tags: "classical, orchestral", climax: "dramatic crescendo, epic climax" },
   "动漫": { tags: "anime, j-pop, Japanese pop", climax: "catchy chorus, anthemic hook" },
   "chinese-style": { tags: "chinese-style, modern Chinese", climax: "memorable chorus" },
@@ -852,4 +852,73 @@ export function buildStyle(parts: {
 
   const style = collectStyleSegments(segments);
   return style.substring(0, 1000).trim();
+}
+
+/** Suno 偶发把 style 指令回显到 lyrics/prompt 字段时的典型开头 */
+const STYLE_ECHO_PREFIX_RE =
+  /^(lead vocal|lead vocals|song with prominent|full provided lyrics|vocal must sing|must sing the full)\b/i;
+
+/**
+ * 判断 API 返回的「歌词」是否更像 style 回显而非真实歌词（用于落库与展示纠偏）
+ */
+export function lyricsCandidateLooksLikeStyleEcho(
+  candidate: string,
+  submittedStyle: string,
+  userLyricsHint?: string
+): boolean {
+  const c = candidate.trim();
+  if (!c) return false;
+  if (STYLE_ECHO_PREFIX_RE.test(c)) return true;
+  const st = submittedStyle.trim();
+  if (st.length >= 30 && c.length >= 30) {
+    const n = Math.min(80, st.length, c.length);
+    if (st.slice(0, n).toLowerCase() === c.slice(0, n).toLowerCase()) return true;
+  }
+  const user = userLyricsHint?.trim() ?? "";
+  const userHasHan = /[\u4e00-\u9fff]/.test(user);
+  const candHasHan = /[\u4e00-\u9fff]/.test(c);
+  if (user.length >= 12 && userHasHan && c.length > 25 && !candHasHan && /,\s*[a-z]/i.test(c)) return true;
+  return false;
+}
+
+/** 从本次请求实际发送的 `prompt` 字段解析应对外展示的歌词/文案 */
+export function extractLyricsFromSentPrompt(finalPromptSent: string, lyricModeStrict: boolean): string {
+  const raw = finalPromptSent?.trim() ?? "";
+  if (!raw) return "";
+  if (lyricModeStrict) return sanitizeUserInput(raw).trim();
+  const m = raw.match(/\[Content\]\s*([\s\S]+)/i);
+  if (m?.[1]?.trim()) return m[1]!.trim();
+  const stripped = stripStyleExtrasFromPrompt(raw);
+  return (stripped || raw).trim();
+}
+
+/**
+ * 版本列表 `lyrics`：严格模式以用户提交为准；灵活模式在 API 返回可信时用返回，否则用用户侧文本。
+ * 避免 Suno 把 style 误写入 lyrics 字段时污染列表。
+ */
+export function pickLyricsForVersionStorage(args: {
+  sunoPromptOrLyrics?: string | null;
+  userFieldPrompt: string;
+  finalPromptSent: string;
+  submittedStyle: string;
+  lyricModeStrict: boolean;
+  instrumental: boolean;
+}): string | undefined {
+  if (args.instrumental) {
+    const s = args.sunoPromptOrLyrics?.trim();
+    return s || undefined;
+  }
+  const userTrim = args.userFieldPrompt.trim();
+  const fromSent = extractLyricsFromSentPrompt(args.finalPromptSent, args.lyricModeStrict);
+  const suno = args.sunoPromptOrLyrics?.trim();
+  const sunoOk = !!(suno && !lyricsCandidateLooksLikeStyleEcho(suno, args.submittedStyle, userTrim));
+
+  if (args.lyricModeStrict) {
+    const own = (fromSent || userTrim).trim();
+    if (own) return own;
+    if (sunoOk) return suno;
+    return suno || undefined;
+  }
+  if (sunoOk) return suno!;
+  return (fromSent || userTrim).trim() || suno || undefined;
 }
